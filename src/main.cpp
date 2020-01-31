@@ -122,10 +122,10 @@ static void init_temps()
 	for(auto &&x : temps) x = 0;
 }
 
-//#define PANIC_TEMPERATURE(X) ((X) < 0  || (X) > 330) // immidiate panic temperature (thermister failure/open/short)
-//#define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
-#define PANIC_TEMPERATURE(X) false // immidiate panic temperature (thermister failure/open/short)
+#define PANIC_TEMPERATURE(X) ((X) < 0  || (X) > 330) // immidiate panic temperature (thermister failure/open/short)
 #define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
+//#define PANIC_TEMPERATURE(X) false // immidiate panic temperature (thermister failure/open/short)
+//#define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
 #define TEMP_TARGETABLE_LOW 0 // temperature targetable range: low
 #define TEMP_TARGETABLE_HIGH 220 // temperature targetable range: high
 #define TEMP_MAX_BOTTOM_HEATER_DIFFERENCE 30 // allowed difference between most hot heater and most cold heater
@@ -155,6 +155,7 @@ static void write_lcd(const char * p)
 			col = 0;
 			++ line;
 			if(line >= LCD_LINES) return;
+			lcd.setCursor(0, line);
 		}
 		else
 		{
@@ -190,7 +191,13 @@ static void panic(const String &n)
 	display(String(F("!!!Panic!!!\r\n")) + n);
 	Serial.flush();
 	cli();
-	for(;;) /**/ ;
+	for(;;)
+	{
+		set_led(false);
+		_delay_ms(300);
+		set_led(true);
+		_delay_ms(300);
+	}
 }
 
 #if 0
@@ -259,20 +266,21 @@ static void manage_temp()
 			float heater_avg = 0;
 			for(uint8_t i = 0; i < NUM_BOTTOM_HEATERS; ++i)
 			{
-				temps[i] *= (1.0 / ADC_VAL_OVERSAMPLE);
-				if(PANIC_TEMPERATURE(temps[i]))
+				float tmp = temps[i];
+				tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
+				if(PANIC_TEMPERATURE(tmp))
 				{
 					panic(String(F("Bot heater ")) + String((int)i));
 				}
 
-				heater_avg += temps[i];
-				if(heater_min > temps[i]) heater_min = temps[i];
-				if(heater_max < temps[i]) heater_max = temps[i];
-				if(temps[i] >= ANY_HOT_TEMP) any_hot = true;
+				heater_avg += tmp;
+				if(heater_min > tmp) heater_min = tmp;
+				if(heater_max < tmp) heater_max = tmp;
+				if(tmp >= ANY_HOT_TEMP) any_hot = true;
 				Serial.print(F("H"));
 				Serial.print((int)i);
 				Serial.print(':');
-				Serial.print(temps[i]);
+				Serial.print(tmp);
 				Serial.print(' ');
 			}
 			heater_avg *= (1.0 / NUM_BOTTOM_HEATERS);
@@ -290,6 +298,8 @@ static void manage_temp()
 			if(PANIC_TEMPERATURE(tmp))
 				panic(F("Top heater"));
 			if(tmp >= ANY_HOT_TEMP) any_hot = true;
+
+			// store top temperature
 			top_temp = tmp;
 			Serial.print(F("T"));
 			Serial.print(':');
@@ -591,7 +601,7 @@ start:
 				{
 					YIELD;
 					static uint32_t current_op;
-					current_op = *prog;
+					current_op = pgm_read_dword(prog);
 					static uint8_t opcode;
 					opcode = OPCODE_FROM_WORD(current_op);
 
