@@ -89,14 +89,6 @@ static void button_update_handler()
 
 
 
-// program opecodes
-#define PROG_END    0
-#define PROG_DWELL  1
-#define PROG_SET_BOT_TEMP 2
-#define PROG_WAIT_BOT_TEMP 3
-#define PROG_SET_TOP_TEMP 4
-#define PROG_WAIT_TOP_TEMP 5
-
 
 #define ADC_VAL_OVERSAMPLE 64
 #define ADC_VAL_MAX 1024
@@ -105,10 +97,14 @@ static void button_update_handler()
 #define THERMISTOR_R0 100000.0f // = 100k
 #define THERMISTOR_RP 4700.0f // pull up resistor = 4.7k
 #define SET_POINT 160.0;
-float bot_set_point = 0;
-float top_set_point = 0;
-float bot_temp = 0;
-float top_temp = 0;
+static float bot_set_point = 0;
+static float top_set_point = 0;
+static float bot_temp = 0;
+static float top_temp = 0;
+#define TOP_TEMP_IDX 6
+#define NUM_BOTTOM_HEATERS 6
+#define TOTAL_HEATER_TEMP_SENSORS (NUM_BOTTOM_HEATERS + 1)// +1 = for top temperature
+float temps[TOTAL_HEATER_TEMP_SENSORS] = {0}; 
 
 static void init_temps()
 {
@@ -116,6 +112,7 @@ static void init_temps()
 	top_set_point = 0;
 	bot_temp = 0;
 	top_temp = 0;
+	for(auto &&x : temps) x = 0;
 }
 
 //#define PANIC_TEMPERATURE(X) ((X) < 0  || (X) > 330) // immidiate panic temperature (thermister failure/open/short)
@@ -124,6 +121,7 @@ static void init_temps()
 #define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
 #define TEMP_TARGETABLE_LOW 0 // temperature targetable range: low
 #define TEMP_TARGETABLE_HIGH 220 // temperature targetable range: high
+#define TEMP_MAX_BOTTOM_HEATER_DIFFERENCE 30 // allowed difference between most hot heater and most cold heater
 uint8_t heater_power = 0; // last heater power
 
 
@@ -182,6 +180,7 @@ static void panic(const String &n)
 	for(;;) /**/ ;
 }
 
+#if 0
 // measure adc with oversampling
 static float oversample_adc(int num)
 {
@@ -192,6 +191,20 @@ static float oversample_adc(int num)
 	}
 	return (float)accum *
 		(1.0 / ((float)ADC_VAL_OVERSAMPLE * (float)ADC_VAL_MAX)) +
+		(1.0/ADC_VAL_MAX/2.0);
+}
+#endif
+
+// measure adc with no oversampling
+static float measure_adc(int num)
+{
+	uint32_t accum = 0;
+	for(int i = 0; i < 1; ++i)
+	{
+		accum += analogRead(num);
+	}
+	return (float)accum *
+		(1.0 / ((float)1.0 * (float)ADC_VAL_MAX)) +
 		(1.0/ADC_VAL_MAX/2.0);
 }
 
@@ -210,59 +223,89 @@ static float adc_val_to_temp(float adc_val_normalized)
 // temperature management
 static void manage_temp()
 {
-	static uint8_t phase = 0;
-	EVERY_MS(5)
-		switch(phase)
+	EVERY_MS(1)
+		// measure temperatures
+		static uint8_t temp_counts = 0;
+
+		for(uint8_t i = 0; i < TOTAL_HEATER_TEMP_SENSORS; ++i)
 		{
-		case 0:
-			// first, measure temperatures
-			bot_temp = adc_val_to_temp(oversample_adc(0));
-			if(PANIC_TEMPERATURE(bot_temp))
-				panic(F("Bottom temp err"));
-			break;
-
-		case 1:
-			top_temp = adc_val_to_temp(oversample_adc(1));
-			if(PANIC_TEMPERATURE(top_temp))
-				panic(F("Top temp err"));
-			break;
-
-		case 2:
-			// update pid values
-			bot_pid.set_set_point(bot_set_point);
-			top_pid.set_set_point(top_set_point);
-
-			// decide which temperature should to be reached
-			uint8_t top_value, bot_value;
-			top_value = (uint8_t)(int)top_pid.update(top_temp);
-			bot_value = (uint8_t)(int)bot_pid.update(bot_temp);
-
-			if(top_set_point > 0.0f)
-			{
-				// follow top set point
-				heater_power = top_value;
-			}
-			else
-			{
-				// follow bottom set point
-				heater_power = bot_value;
-			}
-
-			// needs suppression?
-			if(SUPRESS_TEMPERATURE(bot_temp)||
-				SUPRESS_TEMPERATURE(top_temp)
-				)
-			{
-				heater_power = 0;
-			}
-			break;
-		
-		case 3:
-		default:
-			break;
+			float t = adc_val_to_temp(measure_adc(i));
+			temps[i] += t;
 		}
-		++ phase;
-		phase &= 3;
+
+		++temp_counts;
+		if(temp_counts >= ADC_VAL_OVERSAMPLE)
+		{
+			temp_counts = 0;
+			// all sensors are sufficiently measured
+
+			// check bottom heaters
+			float heater_min = temps[0];
+			float heater_max = temps[0];
+			float heater_avg = 0;
+			for(uint8_t i = 0; i < NUM_BOTTOM_HEATERS; ++i)
+			{
+				temps[i] *= (1.0 / ADC_VAL_OVERSAMPLE);
+				if(PANIC_TEMPERATURE(temps[i]))
+				{
+					panic(String(F("Bot heater ")) + String(i));
+				}
+
+				heater_avg += temps[i];
+				if(heater_min > temps[i]) heater_min = temps[i];
+				if(heater_max < temps[i]) heater_max = temps[i];
+			}
+			heater_avg *= (1.0 / NUM_BOTTOM_HEATERS);
+
+			// check if most hot heater is far from most cold heater
+			if(heater_max - heater_min >= TEMP_MAX_BOTTOM_HEATER_DIFFERENCE)
+				panic(F("Too much diffs"));
+
+			// store bottom temprature
+			bot_temp = heater_avg;
+
+			// check top heaters
+			float tmp = temps[TOP_TEMP_IDX];
+			tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
+			if(PANIC_TEMPERATURE(tmp))
+				panic(F("Top heater"));
+			top_temp = tmp;
+
+			// clear all accumurators
+			for(auto &&x : temps) x = 0;
+		}
+	END_EVERY_MS
+
+
+
+	EVERY_MS(20)
+		// update pid values
+		bot_pid.set_set_point(bot_set_point);
+		top_pid.set_set_point(top_set_point);
+
+		// decide which temperature should to be reached
+		uint8_t top_value, bot_value;
+		top_value = (uint8_t)(int)top_pid.update(top_temp);
+		bot_value = (uint8_t)(int)bot_pid.update(bot_temp);
+
+		if(top_set_point > 0.0f)
+		{
+			// follow top set point
+			heater_power = top_value;
+		}
+		else
+		{
+			// follow bottom set point
+			heater_power = bot_value;
+		}
+
+		// needs suppression?
+		if(SUPRESS_TEMPERATURE(bot_temp)||
+			SUPRESS_TEMPERATURE(top_temp)
+			)
+		{
+			heater_power = 0;
+		}
 	END_EVERY_MS
 
 	// Do PWM
@@ -433,6 +476,49 @@ static void handle_status_keys(uint8_t mode)
 	retarget_menu_temp(mode);
 }
 
+// program opecodes
+#define PROG_END    0
+#define PROG_DWELL  1
+#define PROG_SET_BOT_TEMP 2
+#define PROG_WAIT_BOT_TEMP 3
+#define PROG_SET_TOP_TEMP 4
+#define PROG_WAIT_TOP_TEMP 5
+
+#define MAKE_PROGRAM_WORD(OP, ARG) (((uint32_t)(ARG)<<3) | (OP))
+#define OPCODE_FROM_WORD(CODE) (uint8_t)((CODE)&0x07)
+#define ARG_FROM_WORD(CODE) (uint32_t)((CODE)>>3)
+
+#define TEMP_MATCH_MARGIN 1
+
+
+static PROGMEM const uint32_t PROG1[] = {
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 40),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        10),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 30),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        10),
+	MAKE_PROGRAM_WORD(PROG_END,          0)
+};
+static PROGMEM const uint32_t PROG2[] = {
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 45),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        10),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 35),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        10),
+	MAKE_PROGRAM_WORD(PROG_END,          0)
+};
+
+static bool handle_prog_keys()
+{
+	if(button_counts[BUTTON_OK] != 0)
+	{
+		button_counts[BUTTON_OK] = 0;
+		return false;
+	}
+
+	update_status_display();
+
+	return true;
+}
+
 static void ui_handler()
 {
 	static uint8_t state = 0;
@@ -444,6 +530,7 @@ static void ui_handler()
 		for(;;)
 		{
 			// first, show main screen
+start:
 			init_temps();
 			init_menu();
 			add_menu(F("prog 1")); // MENU_PROG1
@@ -464,13 +551,73 @@ static void ui_handler()
 			static uint8_t m_ind;
 			m_ind = menu_selected_index;
 
-			if(m_ind == MENU_PROG1)
+			if(m_ind == MENU_PROG1 || m_ind == MENU_PROG2)
 			{
+				static const uint32_t *prog = nullptr;
+				if(m_ind == MENU_PROG1)
+					prog = PROG1;
+				else if(m_ind == MENU_PROG2)
+					prog = PROG2;
 
-			}
-			else if(m_ind == MENU_PROG2)
-			{
-				
+				for(;;)
+				{
+					YIELD;
+					static uint32_t current_op;
+					current_op = *prog;
+					static uint8_t opcode;
+					opcode = OPCODE_FROM_WORD(current_op);
+
+					if(opcode == PROG_END)
+					{
+						goto start;
+					}
+					else if(opcode == PROG_DWELL)
+					{
+						static uint32_t secs;
+						secs = ARG_FROM_WORD(current_op);
+						while(secs --)
+						{
+							YIELD;
+							static uint32_t m;
+							m = millis() + 1000;
+
+							while((int32_t)(millis() - m) <= 0)
+							{
+								if(!handle_prog_keys()) goto start;
+							}
+						}
+					}
+					else if(opcode == PROG_SET_BOT_TEMP)
+					{
+						bot_set_point = ARG_FROM_WORD(current_op);
+					}
+					else if(opcode == PROG_SET_TOP_TEMP)
+					{
+						top_set_point = ARG_FROM_WORD(current_op);
+					}
+					else if(opcode == PROG_WAIT_BOT_TEMP || opcode == PROG_WAIT_TOP_TEMP)
+					{
+						static int16_t temp;
+						temp = ARG_FROM_WORD(current_op);
+						for(;;)
+						{
+							YIELD;
+							if(opcode == PROG_WAIT_BOT_TEMP)
+							{
+								if(bot_temp - TEMP_MATCH_MARGIN <= temp && temp <= bot_temp + TEMP_MATCH_MARGIN ) break;
+							}
+							else if(opcode == PROG_SET_TOP_TEMP)
+							{
+								if(top_temp - TEMP_MATCH_MARGIN <= temp && temp <= top_temp + TEMP_MATCH_MARGIN ) break;
+							}
+							
+							if(!handle_prog_keys()) goto start;
+						}
+					}
+					++ prog;
+				}
+
+				goto start;
 			}
 			else if(m_ind == MENU_SET_BOT || m_ind == MENU_SET_TOP)
 			{
