@@ -8,6 +8,13 @@
 #include <stdint.h>
 #include "pid.h"
 
+// status LED
+static void set_led(bool b)
+{
+	pinMode(13, OUTPUT);
+	digitalWrite(13, b);
+}
+
 // LCD
 #define LCD_COLS 16
 #define LCD_LINES 2
@@ -122,8 +129,9 @@ static void init_temps()
 #define TEMP_TARGETABLE_LOW 0 // temperature targetable range: low
 #define TEMP_TARGETABLE_HIGH 220 // temperature targetable range: high
 #define TEMP_MAX_BOTTOM_HEATER_DIFFERENCE 30 // allowed difference between most hot heater and most cold heater
-uint8_t heater_power = 0; // last heater power
-
+#define ANY_HOT_TEMP 50 // warning temperature if any sensor is avobe this
+static uint8_t heater_power = 0; // last heater power
+static bool any_hot;
 
 static pid_controller_t bot_pid(8, 0.1, 10, 0.95, 40, 0, 127);
 static pid_controller_t top_pid(4, 0.1, 40, 0.95, 40, 0, 127);
@@ -162,8 +170,13 @@ static void write_lcd(const char * p)
 static void display(const String &n)
 {
 	write_lcd(n.c_str());
-	Serial.print(n);
-	Serial.print(F("\r\n\r\n"));
+	static String last_msg;
+	if(last_msg != n)
+	{
+		last_msg = n;
+		Serial.print(n);
+		Serial.print(F("\r\n\r\n"));
+	}
 }
 
 
@@ -238,6 +251,7 @@ static void manage_temp()
 		{
 			temp_counts = 0;
 			// all sensors are sufficiently measured
+			any_hot = false;
 
 			// check bottom heaters
 			float heater_min = temps[0];
@@ -248,12 +262,18 @@ static void manage_temp()
 				temps[i] *= (1.0 / ADC_VAL_OVERSAMPLE);
 				if(PANIC_TEMPERATURE(temps[i]))
 				{
-					panic(String(F("Bot heater ")) + String(i));
+					panic(String(F("Bot heater ")) + String((int)i));
 				}
 
 				heater_avg += temps[i];
 				if(heater_min > temps[i]) heater_min = temps[i];
 				if(heater_max < temps[i]) heater_max = temps[i];
+				if(temps[i] >= ANY_HOT_TEMP) any_hot = true;
+				Serial.print(F("H"));
+				Serial.print((int)i);
+				Serial.print(':');
+				Serial.print(temps[i]);
+				Serial.print(' ');
 			}
 			heater_avg *= (1.0 / NUM_BOTTOM_HEATERS);
 
@@ -269,7 +289,12 @@ static void manage_temp()
 			tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
 			if(PANIC_TEMPERATURE(tmp))
 				panic(F("Top heater"));
+			if(tmp >= ANY_HOT_TEMP) any_hot = true;
 			top_temp = tmp;
+			Serial.print(F("T"));
+			Serial.print(':');
+			Serial.print(tmp);
+			Serial.print(F("\r\n"));
 
 			// clear all accumurators
 			for(auto &&x : temps) x = 0;
@@ -319,6 +344,9 @@ static void manage_temp()
 		digitalWrite(10, LOW);
 		digitalWrite( 9, LOW);	
 	}
+
+	// set status led and enable fan if any sensor detected hot condition
+	set_led(any_hot);
 }
 
 static void update_status_display()
