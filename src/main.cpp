@@ -108,9 +108,11 @@ static float bot_set_point = 0;
 static float top_set_point = 0;
 static float bot_temp = 0;
 static float top_temp = 0;
+static float env_temp = 0;
+#define ENV_TEMP_IDX 7
 #define TOP_TEMP_IDX 6
 #define NUM_BOTTOM_HEATERS 6
-#define TOTAL_HEATER_TEMP_SENSORS (NUM_BOTTOM_HEATERS + 1)// +1 = for top temperature
+#define TOTAL_HEATER_TEMP_SENSORS (NUM_BOTTOM_HEATERS + 2)// +2 = for top&env temperature
 float temps[TOTAL_HEATER_TEMP_SENSORS] = {0}; 
 
 static void init_temps()
@@ -128,13 +130,13 @@ static void init_temps()
 //#define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
 #define TEMP_TARGETABLE_LOW 0 // temperature targetable range: low
 #define TEMP_TARGETABLE_HIGH 220 // temperature targetable range: high
-#define TEMP_MAX_BOTTOM_HEATER_DIFFERENCE 30 // allowed difference between most hot heater and most cold heater
+#define TEMP_MAX_BOTTOM_HEATER_DIFFERENCE 60 // allowed difference between most hot heater and most cold heater
 #define ANY_HOT_TEMP 50 // warning temperature if any sensor is avobe this
 static uint8_t heater_power = 0; // last heater power
 static bool any_hot;
 
-static pid_controller_t bot_pid(8, 0.1, 10, 0.95, 40, 0, 127);
-static pid_controller_t top_pid(4, 0.1, 40, 0.95, 40, 0, 127);
+static pid_controller_t bot_pid(8, 20, 50, 0.95, 40, 0, 127);
+static pid_controller_t top_pid(4, 20, 100, 0.95, 40, 0, 127);
 
 // output string to LCD
 static void write_lcd(const char * p)
@@ -238,6 +240,14 @@ static float adc_val_to_temp(float adc_val_normalized)
 	return res - 273.15;
 }
 
+// bit reverset - 8bit
+static uint8_t bit_reverse(uint8_t v)
+{
+	v = ((v & 0b11110000) >> 4) | ((v & 0b00001111) << 4); 
+	v = ((v & 0b11001100) >> 2) | ((v & 0b00110011) << 2); 
+	v = ((v & 0b10101010) >> 1) | ((v & 0b01010101) << 1);
+	return v; 
+}
 
 
 // temperature management
@@ -261,8 +271,8 @@ static void manage_temp()
 			any_hot = false;
 
 			// check bottom heaters
-			float heater_min = temps[0];
-			float heater_max = temps[0];
+			float heater_min = temps[0]* (1.0 / ADC_VAL_OVERSAMPLE);
+			float heater_max = temps[0]* (1.0 / ADC_VAL_OVERSAMPLE);
 			float heater_avg = 0;
 			for(uint8_t i = 0; i < NUM_BOTTOM_HEATERS; ++i)
 			{
@@ -293,7 +303,8 @@ static void manage_temp()
 			bot_temp = heater_avg;
 
 			// check top heaters
-			float tmp = temps[TOP_TEMP_IDX];
+			float tmp;
+			tmp = temps[TOP_TEMP_IDX];
 			tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
 			if(PANIC_TEMPERATURE(tmp))
 				panic(F("Top heater"));
@@ -304,47 +315,57 @@ static void manage_temp()
 			Serial.print(F("T"));
 			Serial.print(':');
 			Serial.print(tmp);
+			Serial.print(' ');
+
+			// check env temperature
+			tmp = temps[ENV_TEMP_IDX];
+			tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
+			if(PANIC_TEMPERATURE(tmp)) // TODO: check env temp limit
+				panic(F("Env heater"));
+			if(tmp >= ANY_HOT_TEMP) any_hot = true;
+
+			// store env temperature
+			env_temp = tmp;
+			Serial.print(F("E"));
+			Serial.print(':');
+			Serial.print(tmp);
 			Serial.print(F("\r\n"));
 
 			// clear all accumurators
 			for(auto &&x : temps) x = 0;
-		}
-	END_EVERY_MS
 
+			// update pid values
+			bot_pid.set_set_point(bot_set_point);
+			top_pid.set_set_point(top_set_point);
 
+			// decide which temperature should to be reached
+			uint8_t top_value, bot_value;
+			top_value = (uint8_t)(int)top_pid.update(top_temp);
+			bot_value = (uint8_t)(int)bot_pid.update(bot_temp);
 
-	EVERY_MS(20)
-		// update pid values
-		bot_pid.set_set_point(bot_set_point);
-		top_pid.set_set_point(top_set_point);
+			if(top_set_point > 0.0f)
+			{
+				// follow top set point
+				heater_power = top_value;
+			}
+			else
+			{
+				// follow bottom set point
+				heater_power = bot_value;
+			}
 
-		// decide which temperature should to be reached
-		uint8_t top_value, bot_value;
-		top_value = (uint8_t)(int)top_pid.update(top_temp);
-		bot_value = (uint8_t)(int)bot_pid.update(bot_temp);
-
-		if(top_set_point > 0.0f)
-		{
-			// follow top set point
-			heater_power = top_value;
-		}
-		else
-		{
-			// follow bottom set point
-			heater_power = bot_value;
-		}
-
-		// needs suppression?
-		if(SUPRESS_TEMPERATURE(bot_temp)||
-			SUPRESS_TEMPERATURE(top_temp)
-			)
-		{
-			heater_power = 0;
+			// needs suppression?
+			if(SUPRESS_TEMPERATURE(bot_temp)||
+				SUPRESS_TEMPERATURE(top_temp)
+				)
+			{
+				heater_power = 0;
+			}
 		}
 	END_EVERY_MS
 
 	// Do PWM
-	if(millis() %128  < heater_power)
+	if(bit_reverse(millis() %128)  < heater_power)
 	{
 		digitalWrite(10, HIGH);
 		digitalWrite( 9, HIGH);	
@@ -365,7 +386,7 @@ static void update_status_display()
 		char buf[18*2];
 		// first line:  B:XXX/XXX P:XXX
 		// second line: T:XXX/XXX
-		sprintf_P(buf, PSTR("B:%3d/%3d P:%3d\r\n" "T:%3d/%3d" ), (int)bot_set_point, (int)bot_temp, (int)heater_power , (int)top_set_point, (int)top_temp);
+		sprintf_P(buf, PSTR("B:%3d/%3d P:%3d\r\n" "T:%3d/%3d" ), (int)(bot_set_point+0.5f), (int)(bot_temp+0.5f), (int)heater_power , (int)(top_set_point+0.5f), (int)(top_temp+0.5f));
 		display(buf);
 	END_EVERY_MS
 }
@@ -530,10 +551,20 @@ static void handle_status_keys(uint8_t mode)
 
 
 static PROGMEM const uint32_t PROG1[] = {
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 40),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        10),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 30),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        10),
+//	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 165),
+//	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 75),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 165),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 75),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 165),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 75),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 165),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
 	MAKE_PROGRAM_WORD(PROG_END,          0)
 };
 static PROGMEM const uint32_t PROG2[] = {
@@ -621,6 +652,7 @@ start:
 
 							while((int32_t)(millis() - m) <= 0)
 							{
+								YIELD;
 								if(!handle_prog_keys()) goto start;
 							}
 						}
