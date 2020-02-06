@@ -124,19 +124,19 @@ static void init_temps()
 	for(auto &&x : temps) x = 0;
 }
 
-#define PANIC_TEMPERATURE(X) ((X) < 0  || (X) > 330) // immidiate panic temperature (thermister failure/open/short)
-#define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
+#define PANIC_TEMPERATURE(X) ((X) < 0  || (X) > 350) // immidiate panic temperature (thermister failure/open/short)
+#define SUPRESS_TEMPERATURE(X) ((X) > 300) // temperature which needs heating suppression
 //#define PANIC_TEMPERATURE(X) false // immidiate panic temperature (thermister failure/open/short)
 //#define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
 #define TEMP_TARGETABLE_LOW 0 // temperature targetable range: low
-#define TEMP_TARGETABLE_HIGH 220 // temperature targetable range: high
-#define TEMP_MAX_BOTTOM_HEATER_DIFFERENCE 60 // allowed difference between most hot heater and most cold heater
+#define TEMP_TARGETABLE_HIGH 250 // temperature targetable range: high
+#define TEMP_MAX_BOTTOM_HEATER_DIFFERENCE 180 // allowed difference between most hot heater and most cold heater
 #define ANY_HOT_TEMP 50 // warning temperature if any sensor is avobe this
 static uint8_t heater_power = 0; // last heater power
 static bool any_hot;
 
-static pid_controller_t bot_pid(8, 20, 50, 0.95, 40, 0, 127);
-static pid_controller_t top_pid(4, 20, 100, 0.95, 40, 0, 127);
+static pid_controller_t bot_pid(3, 120, 600, 0.95, 40, 0, 127);
+static pid_controller_t top_pid(4, 40, 1200, 0.95, 40, 0, 127);
 
 // output string to LCD
 static void write_lcd(const char * p)
@@ -365,7 +365,7 @@ static void manage_temp()
 	END_EVERY_MS
 
 	// Do PWM
-	if(bit_reverse(millis() %128)  < heater_power)
+	if(bit_reverse(millis() %256)  < 2*((heater_power>=127)?128:heater_power))
 	{
 		digitalWrite(10, HIGH);
 		digitalWrite( 9, HIGH);	
@@ -380,13 +380,15 @@ static void manage_temp()
 	set_led(any_hot);
 }
 
+static int32_t secs_remain;
+
 static void update_status_display()
 {
 	EVERY_MS(200)
 		char buf[18*2];
 		// first line:  B:XXX/XXX P:XXX
 		// second line: T:XXX/XXX
-		sprintf_P(buf, PSTR("B:%3d/%3d P:%3d\r\n" "T:%3d/%3d" ), (int)(bot_set_point+0.5f), (int)(bot_temp+0.5f), (int)heater_power , (int)(top_set_point+0.5f), (int)(top_temp+0.5f));
+		sprintf_P(buf, PSTR("B:%3d/%3d P:%3d\r\n" "T:%3d/%3d %d" ), (int)(bot_set_point+0.5f), (int)(bot_temp+0.5f), (int)heater_power , (int)(top_set_point+0.5f), (int)(top_temp+0.5f), secs_remain);
 		display(buf);
 	END_EVERY_MS
 }
@@ -551,20 +553,20 @@ static void handle_status_keys(uint8_t mode)
 
 
 static PROGMEM const uint32_t PROG1[] = {
-//	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 165),
-//	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 75),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 165),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 75),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 250),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 165),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 80),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 75),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 250),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 80),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 250),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 80),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
+	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 250),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 165),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
 	MAKE_PROGRAM_WORD(PROG_END,          0)
 };
 static PROGMEM const uint32_t PROG2[] = {
@@ -642,9 +644,8 @@ start:
 					}
 					else if(opcode == PROG_DWELL)
 					{
-						static uint32_t secs;
-						secs = ARG_FROM_WORD(current_op);
-						while(secs --)
+						secs_remain = ARG_FROM_WORD(current_op);
+						while(secs_remain --)
 						{
 							YIELD;
 							static uint32_t m;
