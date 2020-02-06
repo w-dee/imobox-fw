@@ -112,7 +112,7 @@ static float env_temp = 0;
 #define ENV_TEMP_IDX 2
 #define AIR_TEMP_IDX 1
 #define NUM_HEATER_SENSORS 1
-#define TOTAL_HEATER_TEMP_SENSORS (NUM_HEATER_SENSORS + 2)// +2 = for air&env temperature
+#define TOTAL_HEATER_TEMP_SENSORS (NUM_HEATER_SENSORS + 2)// +2 = for air&env temperature; so, sensors are: 0:heater 1:air 2:env
 float temps[TOTAL_HEATER_TEMP_SENSORS] = {0}; 
 
 static void init_temps()
@@ -133,7 +133,7 @@ static void init_temps()
 #define TEMP_MAX_HEATER_DIFFERENCE 180 // allowed difference between most hot heater and most cold heater
 #define ANY_HOT_TEMP 50 // warning temperature if any sensor is avobe this
 static uint8_t heater_power = 0; // last heater power
-static bool any_hot;
+static bool any_hot = false;
 #define AIR_TEMP_LPF_COEFF 0.95 // air temperature IIR LPF coeff
 
 static pid_controller_t heater_pid(3, 120, 600, 0.95, 40, 0, 127);
