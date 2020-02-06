@@ -104,39 +104,40 @@ static void button_update_handler()
 #define THERMISTOR_R0 100000.0f // = 100k
 #define THERMISTOR_RP 4700.0f // pull up resistor = 4.7k
 #define SET_POINT 160.0;
-static float bot_set_point = 0;
-static float top_set_point = 0;
-static float bot_temp = 0;
-static float top_temp = 0;
+static float heater_set_point = 0;
+static float air_set_point = 0;
+static float heater_temp = 0;
+static float air_temp = 0;
 static float env_temp = 0;
-#define ENV_TEMP_IDX 7
-#define TOP_TEMP_IDX 6
-#define NUM_BOTTOM_HEATERS 6
-#define TOTAL_HEATER_TEMP_SENSORS (NUM_BOTTOM_HEATERS + 2)// +2 = for top&env temperature
+#define ENV_TEMP_IDX 2
+#define AIR_TEMP_IDX 1
+#define NUM_HEATER_SENSORS 1
+#define TOTAL_HEATER_TEMP_SENSORS (NUM_HEATER_SENSORS + 2)// +2 = for air&env temperature
 float temps[TOTAL_HEATER_TEMP_SENSORS] = {0}; 
 
 static void init_temps()
 {
-	bot_set_point = 0;
-	top_set_point = 0;
-	bot_temp = 0;
-	top_temp = 0;
+	heater_set_point = 0;
+	air_set_point = 0;
+	heater_temp = 0;
+	air_temp = 0;
 	for(auto &&x : temps) x = 0;
 }
 
-#define PANIC_TEMPERATURE(X) ((X) < 0  || (X) > 350) // immidiate panic temperature (thermister failure/open/short)
-#define SUPRESS_TEMPERATURE(X) ((X) > 300) // temperature which needs heating suppression
+#define PANIC_TEMPERATURE(X) ((X) < 0  || (X) > 400) // immidiate panic temperature (thermister failure/open/short)
+#define SUPRESS_TEMPERATURE(X) ((X) > 350) // temperature which needs heating suppression
 //#define PANIC_TEMPERATURE(X) false // immidiate panic temperature (thermister failure/open/short)
 //#define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
 #define TEMP_TARGETABLE_LOW 0 // temperature targetable range: low
 #define TEMP_TARGETABLE_HIGH 250 // temperature targetable range: high
-#define TEMP_MAX_BOTTOM_HEATER_DIFFERENCE 180 // allowed difference between most hot heater and most cold heater
+#define TEMP_MAX_HEATER_DIFFERENCE 180 // allowed difference between most hot heater and most cold heater
 #define ANY_HOT_TEMP 50 // warning temperature if any sensor is avobe this
 static uint8_t heater_power = 0; // last heater power
 static bool any_hot;
+#define AIR_TEMP_LPF_COEFF 0.95 // air temperature IIR LPF coeff
 
-static pid_controller_t bot_pid(3, 120, 600, 0.95, 40, 0, 127);
-static pid_controller_t top_pid(4, 40, 1200, 0.95, 40, 0, 127);
+static pid_controller_t heater_pid(3, 120, 600, 0.95, 40, 0, 127);
+static pid_controller_t air_pid(4, 40, 1200, 0.95, 40, 0, 127);
 
 // output string to LCD
 static void write_lcd(const char * p)
@@ -270,17 +271,17 @@ static void manage_temp()
 			// all sensors are sufficiently measured
 			any_hot = false;
 
-			// check bottom heaters
+			// check heaters
 			float heater_min = temps[0]* (1.0 / ADC_VAL_OVERSAMPLE);
 			float heater_max = temps[0]* (1.0 / ADC_VAL_OVERSAMPLE);
 			float heater_avg = 0;
-			for(uint8_t i = 0; i < NUM_BOTTOM_HEATERS; ++i)
+			for(uint8_t i = 0; i < NUM_HEATER_SENSORS; ++i)
 			{
 				float tmp = temps[i];
 				tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
 				if(PANIC_TEMPERATURE(tmp))
 				{
-					panic(String(F("Bot heater ")) + String((int)i));
+					panic(String(F("Heater ")) + String((int)i));
 				}
 
 				heater_avg += tmp;
@@ -293,26 +294,26 @@ static void manage_temp()
 				Serial.print(tmp);
 				Serial.print(' ');
 			}
-			heater_avg *= (1.0 / NUM_BOTTOM_HEATERS);
+			heater_avg *= (1.0 / NUM_HEATER_SENSORS);
 
 			// check if most hot heater is far from most cold heater
-			if(heater_max - heater_min >= TEMP_MAX_BOTTOM_HEATER_DIFFERENCE)
+			if(heater_max - heater_min >= TEMP_MAX_HEATER_DIFFERENCE)
 				panic(F("Too much diffs"));
 
-			// store bottom temprature
-			bot_temp = heater_avg;
+			// store heater temprature
+			heater_temp = heater_avg;
 
-			// check top heaters
+			// check air heaters
 			float tmp;
-			tmp = temps[TOP_TEMP_IDX];
+			tmp = temps[AIR_TEMP_IDX];
 			tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
 			if(PANIC_TEMPERATURE(tmp))
-				panic(F("Top heater"));
+				panic(F("Heater"));
 			if(tmp >= ANY_HOT_TEMP) any_hot = true;
 
-			// store top temperature
-			top_temp = tmp;
-			Serial.print(F("T"));
+			// store air temperature
+			air_temp += (tmp - air_temp) * AIR_TEMP_LPF_COEFF;
+			Serial.print(F("A"));
 			Serial.print(':');
 			Serial.print(tmp);
 			Serial.print(' ');
@@ -335,28 +336,28 @@ static void manage_temp()
 			for(auto &&x : temps) x = 0;
 
 			// update pid values
-			bot_pid.set_set_point(bot_set_point);
-			top_pid.set_set_point(top_set_point);
+			heater_pid.set_set_point(heater_set_point);
+			air_pid.set_set_point(air_set_point);
 
 			// decide which temperature should to be reached
-			uint8_t top_value, bot_value;
-			top_value = (uint8_t)(int)top_pid.update(top_temp);
-			bot_value = (uint8_t)(int)bot_pid.update(bot_temp);
+			uint8_t air_value, heater_value;
+			air_value = (uint8_t)(int)air_pid.update(air_temp);
+			heater_value = (uint8_t)(int)heater_pid.update(heater_temp);
 
-			if(top_set_point > 0.0f)
+			if(air_set_point > 0.0f)
 			{
-				// follow top set point
-				heater_power = top_value;
+				// follow air set point
+				heater_power = air_value;
 			}
 			else
 			{
-				// follow bottom set point
-				heater_power = bot_value;
+				// follow heater set point
+				heater_power = heater_value;
 			}
 
 			// needs suppression?
-			if(SUPRESS_TEMPERATURE(bot_temp)||
-				SUPRESS_TEMPERATURE(top_temp)
+			if(SUPRESS_TEMPERATURE(heater_temp)||
+				SUPRESS_TEMPERATURE(air_temp)
 				)
 			{
 				heater_power = 0;
@@ -388,7 +389,7 @@ static void update_status_display()
 		char buf[18*2];
 		// first line:  B:XXX/XXX P:XXX
 		// second line: T:XXX/XXX
-		sprintf_P(buf, PSTR("B:%3d/%3d P:%3d\r\n" "T:%3d/%3d %d" ), (int)(bot_set_point+0.5f), (int)(bot_temp+0.5f), (int)heater_power , (int)(top_set_point+0.5f), (int)(top_temp+0.5f), secs_remain);
+		sprintf_P(buf, PSTR("H:%3d/%3d P:%3d\r\n" "A:%3d/%3d %d" ), (int)(heater_set_point+0.5f), (int)(heater_temp+0.5f), (int)heater_power , (int)(air_set_point+0.5f), (int)(air_temp+0.5f), secs_remain);
 		display(buf);
 	END_EVERY_MS
 }
@@ -406,8 +407,8 @@ static void update_status_display()
 
 #define MENU_PROG1 0
 #define MENU_PROG2 1
-#define MENU_SET_BOT 2
-#define MENU_SET_TOP 3
+#define MENU_SET_HEATER 2
+#define MENU_SET_AIR 3
 
 #define MAX_MENU_ITEM 5 // last menu item must be empty string
 static String menu[MAX_MENU_ITEM];
@@ -516,18 +517,18 @@ static void show_temps(const String &n)
 
 static void set_menu_temp(uint8_t mode)
 {
-	if(mode == MENU_SET_BOT)
-		menu_temp = bot_set_point;
-	else if(mode == MENU_SET_TOP)
-		menu_temp = top_set_point;
+	if(mode == MENU_SET_HEATER)
+		menu_temp = heater_set_point;
+	else if(mode == MENU_SET_AIR)
+		menu_temp = air_set_point;
 }
 
 static void retarget_menu_temp(uint8_t mode)
 {
-	if(mode == MENU_SET_BOT)
-		bot_set_point = menu_temp;
-	else if(mode == MENU_SET_TOP)
-		top_set_point = menu_temp;
+	if(mode == MENU_SET_HEATER)
+		heater_set_point = menu_temp;
+	else if(mode == MENU_SET_AIR)
+		air_set_point = menu_temp;
 }
 
 static void handle_status_keys(uint8_t mode)
@@ -540,10 +541,10 @@ static void handle_status_keys(uint8_t mode)
 // program opecodes
 #define PROG_END    0
 #define PROG_DWELL  1
-#define PROG_SET_BOT_TEMP 2
-#define PROG_WAIT_BOT_TEMP 3
-#define PROG_SET_TOP_TEMP 4
-#define PROG_WAIT_TOP_TEMP 5
+#define PROG_SET_HEATER_TEMP 2
+#define PROG_WAIT_HEATER_TEMP 3
+#define PROG_SET_AIR_TEMP 4
+#define PROG_WAIT_AIR_TEMP 5
 
 #define MAKE_PROGRAM_WORD(OP, ARG) (((uint32_t)(ARG)<<3) | (OP))
 #define OPCODE_FROM_WORD(CODE) (uint8_t)((CODE)&0x07)
@@ -553,26 +554,26 @@ static void handle_status_keys(uint8_t mode)
 
 
 static PROGMEM const uint32_t PROG1[] = {
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 250),
+	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 250),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 80),
+	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 80),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 250),
+	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 250),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 80),
+	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 80),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 250),
+	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 250),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 80),
+	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 80),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 250),
+	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 250),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
 	MAKE_PROGRAM_WORD(PROG_END,          0)
 };
 static PROGMEM const uint32_t PROG2[] = {
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 45),
+	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 45),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        10),
-	MAKE_PROGRAM_WORD(PROG_SET_BOT_TEMP, 35),
+	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 35),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        10),
 	MAKE_PROGRAM_WORD(PROG_END,          0)
 };
@@ -606,8 +607,8 @@ start:
 			init_menu();
 			add_menu(F("prog 1")); // MENU_PROG1
 			add_menu(F("prog 2")); // MENU_PROG2
-			add_menu(F("Set bottom temp")); // MENU_SET_BOT
-			add_menu(F("Set top temp")); // MENU_SET_TOP
+			add_menu(F("Set heater temp")); // MENU_SET_HEATER
+			add_menu(F("Set air temp")); // MENU_SET_AIR
 
 			show_menus();
 			YIELD;
@@ -658,28 +659,28 @@ start:
 							}
 						}
 					}
-					else if(opcode == PROG_SET_BOT_TEMP)
+					else if(opcode == PROG_SET_HEATER_TEMP)
 					{
-						bot_set_point = ARG_FROM_WORD(current_op);
+						heater_set_point = ARG_FROM_WORD(current_op);
 					}
-					else if(opcode == PROG_SET_TOP_TEMP)
+					else if(opcode == PROG_SET_AIR_TEMP)
 					{
-						top_set_point = ARG_FROM_WORD(current_op);
+						air_set_point = ARG_FROM_WORD(current_op);
 					}
-					else if(opcode == PROG_WAIT_BOT_TEMP || opcode == PROG_WAIT_TOP_TEMP)
+					else if(opcode == PROG_WAIT_HEATER_TEMP || opcode == PROG_WAIT_AIR_TEMP)
 					{
 						static int16_t temp;
 						temp = ARG_FROM_WORD(current_op);
 						for(;;)
 						{
 							YIELD;
-							if(opcode == PROG_WAIT_BOT_TEMP)
+							if(opcode == PROG_WAIT_HEATER_TEMP)
 							{
-								if(bot_temp - TEMP_MATCH_MARGIN <= temp && temp <= bot_temp + TEMP_MATCH_MARGIN ) break;
+								if(heater_temp - TEMP_MATCH_MARGIN <= temp && temp <= heater_temp + TEMP_MATCH_MARGIN ) break;
 							}
-							else if(opcode == PROG_SET_TOP_TEMP)
+							else if(opcode == PROG_SET_AIR_TEMP)
 							{
-								if(top_temp - TEMP_MATCH_MARGIN <= temp && temp <= top_temp + TEMP_MATCH_MARGIN ) break;
+								if(air_temp - TEMP_MATCH_MARGIN <= temp && temp <= air_temp + TEMP_MATCH_MARGIN ) break;
 							}
 							
 							if(!handle_prog_keys()) goto start;
@@ -690,9 +691,9 @@ start:
 
 				goto start;
 			}
-			else if(m_ind == MENU_SET_BOT || m_ind == MENU_SET_TOP)
+			else if(m_ind == MENU_SET_HEATER || m_ind == MENU_SET_AIR)
 			{
-				// set bottom/top temp
+				// set heater/air temp
 				init_set_temp();
 
 				set_menu_temp(m_ind);
@@ -700,10 +701,10 @@ start:
 				while(button_counts[BUTTON_OK] == 0)
 				{
 					handle_temp_keys();
-					if(m_ind == MENU_SET_BOT)
-						show_temps(F("Bottom temp:"));
-					else if(m_ind == MENU_SET_TOP)
-						show_temps(F("Top temp:"));
+					if(m_ind == MENU_SET_HEATER)
+						show_temps(F("Heater temp:"));
+					else if(m_ind == MENU_SET_AIR)
+						show_temps(F("Air temp:"));
 					YIELD;
 				}
 				button_counts[BUTTON_OK] = 0;
