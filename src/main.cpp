@@ -124,12 +124,12 @@ static void init_temps()
 	for(auto &&x : temps) x = 0;
 }
 
-#define PANIC_TEMPERATURE(X) ((X) < 0  || (X) > 400) // immidiate panic temperature (thermister failure/open/short)
-#define SUPRESS_TEMPERATURE(X) ((X) > 350) // temperature which needs heating suppression
+#define PANIC_TEMPERATURE(X) ((X) < 0  || (X) > 500) // immidiate panic temperature (thermister failure/open/short)
+#define SUPRESS_TEMPERATURE(X) ((X) > 400) // temperature which needs heating suppression
 //#define PANIC_TEMPERATURE(X) false // immidiate panic temperature (thermister failure/open/short)
 //#define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
 #define TEMP_TARGETABLE_LOW 0 // temperature targetable range: low
-#define TEMP_TARGETABLE_HIGH 250 // temperature targetable range: high
+#define TEMP_TARGETABLE_HIGH 350 // temperature targetable range: high
 #define TEMP_MAX_HEATER_DIFFERENCE 180 // allowed difference between most hot heater and most cold heater
 #define ANY_HOT_TEMP 50 // warning temperature if any sensor is avobe this
 static uint8_t heater_power = 0; // last heater power
