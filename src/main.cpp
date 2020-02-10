@@ -97,7 +97,7 @@ static void button_update_handler()
 
 
 
-#define ADC_VAL_OVERSAMPLE 64
+#define ADC_VAL_OVERSAMPLE 256
 #define ADC_VAL_MAX 1024
 #define THERMISTOR_T0 298.15f // = 25 deg C
 #define THERMISTOR_B  3950.0f
@@ -124,12 +124,12 @@ static void init_temps()
 	for(auto &&x : temps) x = 0;
 }
 
-#define PANIC_TEMPERATURE(X) ((X) < 0  || (X) > 500) // immidiate panic temperature (thermister failure/open/short)
-#define SUPRESS_TEMPERATURE(X) ((X) > 400) // temperature which needs heating suppression
+#define PANIC_TEMPERATURE(X) ((X) < -15  || (X) > 500) // immidiate panic temperature (thermister failure/open/short)
+#define SUPRESS_TEMPERATURE(X) ((X) > 450) // temperature which needs heating suppression
 //#define PANIC_TEMPERATURE(X) false // immidiate panic temperature (thermister failure/open/short)
 //#define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
 #define TEMP_TARGETABLE_LOW 0 // temperature targetable range: low
-#define TEMP_TARGETABLE_HIGH 350 // temperature targetable range: high
+#define TEMP_TARGETABLE_HIGH 400 // temperature targetable range: high
 #define TEMP_MAX_HEATER_DIFFERENCE 180 // allowed difference between most hot heater and most cold heater
 #define ANY_HOT_TEMP 50 // warning temperature if any sensor is avobe this
 static uint8_t heater_power = 0; // last heater power
@@ -137,7 +137,7 @@ static bool any_hot = false;
 #define AIR_TEMP_LPF_COEFF 0.95 // air temperature IIR LPF coeff
 
 static pid_controller_t heater_pid(3, 120, 600, 0.95, 40, 0, 127);
-static pid_controller_t air_pid(4, 40, 1200, 0.95, 40, 0, 127);
+static pid_controller_t air_pid(4, 80, 1200, 0.95, 40, 0, 127);
 
 // output string to LCD
 static void write_lcd(const char * p)
@@ -256,7 +256,7 @@ static void manage_temp()
 {
 	EVERY_MS(1)
 		// measure temperatures
-		static uint8_t temp_counts = 0;
+		static uint16_t temp_counts = 0;
 
 		for(uint8_t i = 0; i < TOTAL_HEATER_TEMP_SENSORS; ++i)
 		{
@@ -279,10 +279,6 @@ static void manage_temp()
 			{
 				float tmp = temps[i];
 				tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
-				if(PANIC_TEMPERATURE(tmp))
-				{
-					panic(String(F("Heater ")) + String((int)i));
-				}
 
 				heater_avg += tmp;
 				if(heater_min > tmp) heater_min = tmp;
@@ -293,6 +289,10 @@ static void manage_temp()
 				Serial.print(':');
 				Serial.print(tmp);
 				Serial.print(' ');
+				if(PANIC_TEMPERATURE(tmp))
+				{
+					panic(String(F("Heater ")) + String((int)i));
+				}
 			}
 			heater_avg *= (1.0 / NUM_HEATER_SENSORS);
 
@@ -307,8 +307,6 @@ static void manage_temp()
 			float tmp;
 			tmp = temps[AIR_TEMP_IDX];
 			tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
-			if(PANIC_TEMPERATURE(tmp))
-				panic(F("Heater"));
 			if(tmp >= ANY_HOT_TEMP) any_hot = true;
 
 			// store air temperature
@@ -317,12 +315,12 @@ static void manage_temp()
 			Serial.print(':');
 			Serial.print(tmp);
 			Serial.print(' ');
+			if(PANIC_TEMPERATURE(tmp))
+				panic(F("Air"));
 
 			// check env temperature
 			tmp = temps[ENV_TEMP_IDX];
 			tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
-			if(PANIC_TEMPERATURE(tmp)) // TODO: check env temp limit
-				panic(F("Env heater"));
 			if(tmp >= ANY_HOT_TEMP) any_hot = true;
 
 			// store env temperature
@@ -330,6 +328,8 @@ static void manage_temp()
 			Serial.print(F("E"));
 			Serial.print(':');
 			Serial.print(tmp);
+			if(PANIC_TEMPERATURE(tmp)) // TODO: check env temp limit
+				panic(F("Env"));
 			Serial.print(F("\r\n"));
 
 			// clear all accumurators
@@ -571,10 +571,20 @@ static PROGMEM const uint32_t PROG1[] = {
 	MAKE_PROGRAM_WORD(PROG_END,          0)
 };
 static PROGMEM const uint32_t PROG2[] = {
-	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 45),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        10),
-	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 35),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        10),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 120),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 120),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 120),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 120),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
 	MAKE_PROGRAM_WORD(PROG_END,          0)
 };
 
