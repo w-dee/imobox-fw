@@ -18,9 +18,10 @@ float pid_controller_t::update(float pv)
 
     // update integral value
     integ += (error - integ) * kic;
+    derinteg += (der - derinteg) * kic;
 
     // compute controller output
-    float output = kp * error + ki * integ + kd * der;
+    float output = kp * error + ki * integ + kd * derinteg;
 
     // update previous process value
     perror = error;

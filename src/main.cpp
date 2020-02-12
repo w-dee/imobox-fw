@@ -7,6 +7,7 @@
 #include <math.h>
 #include <stdint.h>
 #include "pid.h"
+#include <TimerOne.h>
 
 // status LED
 static void set_led(bool b)
@@ -114,6 +115,7 @@ static float env_temp = 0;
 #define NUM_HEATER_SENSORS 1
 #define TOTAL_HEATER_TEMP_SENSORS (NUM_HEATER_SENSORS + 2)// +2 = for air&env temperature; so, sensors are: 0:heater 1:air 2:env
 float temps[TOTAL_HEATER_TEMP_SENSORS] = {0}; 
+static uint16_t temp_counts = 0;
 
 static void init_temps()
 {
@@ -121,6 +123,7 @@ static void init_temps()
 	air_set_point = 0;
 	heater_temp = 0;
 	air_temp = 0;
+	temp_counts = 0;	
 	for(auto &&x : temps) x = 0;
 }
 
@@ -132,12 +135,15 @@ static void init_temps()
 #define TEMP_TARGETABLE_HIGH 400 // temperature targetable range: high
 #define TEMP_MAX_HEATER_DIFFERENCE 180 // allowed difference between most hot heater and most cold heater
 #define ANY_HOT_TEMP 50 // warning temperature if any sensor is avobe this
-static uint8_t heater_power = 0; // last heater power
+static float heater_power_target = 0; // heater power designated by PID controller
+static float heater_power = 0; // last heater power
 static bool any_hot = false;
-#define AIR_TEMP_LPF_COEFF 0.95 // air temperature IIR LPF coeff
+#define AIR_TEMP_LPF_COEFF 0.05 // air temperature IIR LPF coeff
+#define HEATER_POWER_MAX 256
+#define HEATER_POWER_INCREMENT 2
 
-static pid_controller_t heater_pid(3, 120, 600, 0.95, 40, 0, 127);
-static pid_controller_t air_pid(4, 80, 1200, 0.95, 40, 0, 127);
+static pid_controller_t heater_pid(6, 200, 1200, 0.05, 40, 0, HEATER_POWER_MAX);
+static pid_controller_t air_pid(10, 100, 10000, 0.05, 40, 0, HEATER_POWER_MAX);
 
 // output string to LCD
 static void write_lcd(const char * p)
@@ -256,11 +262,10 @@ static void manage_temp()
 {
 	EVERY_MS(1)
 		// measure temperatures
-		static uint16_t temp_counts = 0;
 
 		for(uint8_t i = 0; i < TOTAL_HEATER_TEMP_SENSORS; ++i)
 		{
-			float t = adc_val_to_temp(measure_adc(i));
+			float t = measure_adc(i);
 			temps[i] += t;
 		}
 
@@ -271,14 +276,19 @@ static void manage_temp()
 			// all sensors are sufficiently measured
 			any_hot = false;
 
+			// convert adc value to temperature
+			for(auto && v : temps)
+			{
+				v = adc_val_to_temp(v*(1.0 / ADC_VAL_OVERSAMPLE));
+			}
+
 			// check heaters
-			float heater_min = temps[0]* (1.0 / ADC_VAL_OVERSAMPLE);
-			float heater_max = temps[0]* (1.0 / ADC_VAL_OVERSAMPLE);
+			float heater_min = temps[0];
+			float heater_max = temps[0];
 			float heater_avg = 0;
 			for(uint8_t i = 0; i < NUM_HEATER_SENSORS; ++i)
 			{
 				float tmp = temps[i];
-				tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
 
 				heater_avg += tmp;
 				if(heater_min > tmp) heater_min = tmp;
@@ -306,7 +316,6 @@ static void manage_temp()
 			// check air heaters
 			float tmp;
 			tmp = temps[AIR_TEMP_IDX];
-			tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
 			if(tmp >= ANY_HOT_TEMP) any_hot = true;
 
 			// store air temperature
@@ -320,7 +329,6 @@ static void manage_temp()
 
 			// check env temperature
 			tmp = temps[ENV_TEMP_IDX];
-			tmp *= (1.0 / ADC_VAL_OVERSAMPLE);
 			if(tmp >= ANY_HOT_TEMP) any_hot = true;
 
 			// store env temperature
@@ -340,19 +348,19 @@ static void manage_temp()
 			air_pid.set_set_point(air_set_point);
 
 			// decide which temperature should to be reached
-			uint8_t air_value, heater_value;
-			air_value = (uint8_t)(int)air_pid.update(air_temp);
-			heater_value = (uint8_t)(int)heater_pid.update(heater_temp);
+			float air_value, heater_value;
+			air_value = air_pid.update(air_temp);
+			heater_value = heater_pid.update(heater_temp);
 
 			if(air_set_point > 0.0f)
 			{
 				// follow air set point
-				heater_power = air_value;
+				heater_power_target = air_value;
 			}
 			else
 			{
 				// follow heater set point
-				heater_power = heater_value;
+				heater_power_target = heater_value;
 			}
 
 			// needs suppression?
@@ -360,25 +368,49 @@ static void manage_temp()
 				SUPRESS_TEMPERATURE(air_temp)
 				)
 			{
-				heater_power = 0;
+				heater_power_target = 0;
 			}
+
+			// accumulate heater power
+			if(heater_power < heater_power_target)
+			{
+					heater_power += HEATER_POWER_INCREMENT;
+					if(heater_power > heater_power_target) heater_power = heater_power_target;
+					if(heater_power > HEATER_POWER_MAX) heater_power = HEATER_POWER_MAX;
+			}
+			else if(heater_power > heater_power_target)
+			{
+					heater_power -= HEATER_POWER_INCREMENT;
+					if(heater_power < heater_power_target) heater_power = heater_power_target;
+					if(heater_power < 0) heater_power = 0;
+			}
+
+			// flag any_hot if any heater is on
+			if(heater_power > 0) any_hot = true;
 		}
 	END_EVERY_MS
 
-	// Do PWM
-	if(bit_reverse(millis() %256)  < 2*((heater_power>=127)?128:heater_power))
+	// set status led and enable fan if any sensor detected hot condition
+	set_led(any_hot);
+}
+
+
+void timer1_handler(void)
+{
+	// DO PWM
+	static uint8_t count;
+	++count;
+	static_assert(HEATER_POWER_MAX == 256, "heater power max must be 256");
+	if((uint16_t)bit_reverse(count % HEATER_POWER_MAX) < (uint16_t)heater_power)
 	{
+		digitalWrite(9, HIGH);
 		digitalWrite(10, HIGH);
-		digitalWrite( 9, HIGH);	
 	}
 	else
 	{
+		digitalWrite(9, LOW);
 		digitalWrite(10, LOW);
-		digitalWrite( 9, LOW);	
 	}
-
-	// set status led and enable fan if any sensor detected hot condition
-	set_led(any_hot);
 }
 
 static int32_t secs_remain;
@@ -743,6 +775,8 @@ void setup() {
 	pinMode(9, OUTPUT);
 	pinMode(10, OUTPUT);
 	lcd.begin(LCD_COLS, LCD_LINES);
+	Timer1.initialize(1000000 / 110);
+	Timer1.attachInterrupt(timer1_handler);
 
 	display(F("welcome\r\nyakiimo"));
 }
