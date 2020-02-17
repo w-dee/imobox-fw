@@ -9,17 +9,22 @@
 #include "pid.h"
 #include <TimerOne.h>
 
+// pins
+#define HEATER_PIN 9
+#define TONE_PIN 11
+#define FAN_STATUS_PIN 13
+
 // status LED
 static void set_led(bool b)
 {
-	pinMode(13, OUTPUT);
-	digitalWrite(13, b);
+	pinMode(FAN_STATUS_PIN, OUTPUT);
+	digitalWrite(FAN_STATUS_PIN, b);
 }
 
 // LCD
 #define LCD_COLS 16
 #define LCD_LINES 2
-LiquidCrystal lcd(11, 12, 5,6,7,8);
+LiquidCrystal lcd(10, 12, 5,6,7,8);
 
 
 // polling timer
@@ -127,8 +132,8 @@ static void init_temps()
 	for(auto &&x : temps) x = 0;
 }
 
-#define PANIC_TEMPERATURE(X) ((X) < -15  || (X) > 500) // immidiate panic temperature (thermister failure/open/short)
-#define SUPRESS_TEMPERATURE(X) ((X) > 450) // temperature which needs heating suppression
+#define PANIC_TEMPERATURE(X) ((X) < -15  || (X) > 730) // immidiate panic temperature (thermister failure/open/short)
+#define SUPRESS_TEMPERATURE(X) ((X) > 650) // temperature which needs heating suppression
 //#define PANIC_TEMPERATURE(X) false // immidiate panic temperature (thermister failure/open/short)
 //#define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
 #define TEMP_TARGETABLE_LOW 0 // temperature targetable range: low
@@ -136,14 +141,23 @@ static void init_temps()
 #define TEMP_MAX_HEATER_DIFFERENCE 180 // allowed difference between most hot heater and most cold heater
 #define ANY_HOT_TEMP 50 // warning temperature if any sensor is avobe this
 static float heater_power_target = 0; // heater power designated by PID controller
-static float heater_power = 0; // last heater power
+static volatile float heater_power = 0; // last heater power
 static bool any_hot = false;
 #define AIR_TEMP_LPF_COEFF 0.05 // air temperature IIR LPF coeff
 #define HEATER_POWER_MAX 256
 #define HEATER_POWER_INCREMENT 2
 
 static pid_controller_t heater_pid(6, 200, 1200, 0.05, 40, 0, HEATER_POWER_MAX);
-static pid_controller_t air_pid(10, 100, 10000, 0.05, 40, 0, HEATER_POWER_MAX);
+#define AIR_BASE_P 6
+#define AIR_BASE_I 70
+#define AIR_BASE_D 37000
+static pid_controller_t air_pid(AIR_BASE_P, AIR_BASE_I, AIR_BASE_D, 0.05, 40, 0, HEATER_POWER_MAX);
+#define AIR_PID_PARAM_ADJUST \
+	air_pid.kp = air_pid.setpoint >= 80 ? AIR_BASE_P * 2 : AIR_BASE_P; \
+	air_pid.ki = air_pid.setpoint >= 80 ? AIR_BASE_I * 2 : AIR_BASE_I;
+
+#define PID_SETPOINT_OFFSET 1.0
+
 
 // output string to LCD
 static void write_lcd(const char * p)
@@ -193,10 +207,8 @@ static void display(const String &n)
 // panic handler
 static void panic(const String &n)
 {
-	pinMode(9, OUTPUT);
-	pinMode(10, OUTPUT);
-	digitalWrite(9, LOW); // disable heater
-	digitalWrite(10, LOW); // disable heater
+	pinMode(HEATER_PIN, OUTPUT);
+	digitalWrite(HEATER_PIN, LOW); // disable heater
 	display(String(F("!!!Panic!!!\r\n")) + n);
 	Serial.flush();
 	cli();
@@ -338,14 +350,14 @@ static void manage_temp()
 			Serial.print(tmp);
 			if(PANIC_TEMPERATURE(tmp)) // TODO: check env temp limit
 				panic(F("Env"));
-			Serial.print(F("\r\n"));
 
 			// clear all accumurators
 			for(auto &&x : temps) x = 0;
 
 			// update pid values
-			heater_pid.set_set_point(heater_set_point);
-			air_pid.set_set_point(air_set_point);
+			heater_pid.set_set_point(heater_set_point + PID_SETPOINT_OFFSET);
+			air_pid.set_set_point(air_set_point + PID_SETPOINT_OFFSET);
+			AIR_PID_PARAM_ADJUST;
 
 			// decide which temperature should to be reached
 			float air_value, heater_value;
@@ -372,21 +384,39 @@ static void manage_temp()
 			}
 
 			// accumulate heater power
-			if(heater_power < heater_power_target)
+			float hp = heater_power;
+			if(hp < heater_power_target)
 			{
-					heater_power += HEATER_POWER_INCREMENT;
-					if(heater_power > heater_power_target) heater_power = heater_power_target;
-					if(heater_power > HEATER_POWER_MAX) heater_power = HEATER_POWER_MAX;
+					hp += HEATER_POWER_INCREMENT;
+					if(hp > heater_power_target) hp = heater_power_target;
+					if(hp > HEATER_POWER_MAX) hp = HEATER_POWER_MAX;
 			}
-			else if(heater_power > heater_power_target)
+			else if(hp > heater_power_target)
 			{
-					heater_power -= HEATER_POWER_INCREMENT;
-					if(heater_power < heater_power_target) heater_power = heater_power_target;
-					if(heater_power < 0) heater_power = 0;
+					hp -= HEATER_POWER_INCREMENT;
+					if(hp < heater_power_target) hp = heater_power_target;
+					if(hp < 0) hp = 0;
 			}
 
 			// flag any_hot if any heater is on
-			if(heater_power > 0) any_hot = true;
+			if(hp > 0) any_hot = true;
+
+			// write heater_power
+			noInterrupts();
+			heater_power = hp;
+			interrupts();
+
+			// dump
+			Serial.print(F(" P:"));
+			Serial.print((int)heater_power_target);
+			Serial.print(F("/"));
+			Serial.print((int)hp);
+			Serial.print(F("\r\n"));
+
+			if(air_set_point > 0.0f)
+				air_pid.dump();
+			else
+				heater_pid.dump();
 		}
 	END_EVERY_MS
 
@@ -403,25 +433,23 @@ void timer1_handler(void)
 	static_assert(HEATER_POWER_MAX == 256, "heater power max must be 256");
 	if((uint16_t)bit_reverse(count % HEATER_POWER_MAX) < (uint16_t)heater_power)
 	{
-		digitalWrite(9, HIGH);
-		digitalWrite(10, HIGH);
+		digitalWrite(HEATER_PIN, HIGH);
 	}
 	else
 	{
-		digitalWrite(9, LOW);
-		digitalWrite(10, LOW);
+		digitalWrite(HEATER_PIN, LOW);
 	}
 }
 
 static int32_t secs_remain;
 
-static void update_status_display()
+static void update_status_display(const String & status)
 {
 	EVERY_MS(200)
 		char buf[18*2];
 		// first line:  B:XXX/XXX P:XXX
-		// second line: T:XXX/XXX
-		sprintf_P(buf, PSTR("H:%3d/%3d P:%3d\r\n" "A:%3d/%3d %d" ), (int)(heater_set_point+0.5f), (int)(heater_temp+0.5f), (int)heater_power , (int)(air_set_point+0.5f), (int)(air_temp+0.5f), secs_remain);
+		// second line: T:XXX/XXX 
+		sprintf_P(buf, PSTR("H:%3d/%3d P:%3d\r\n" "A:%3d/%3d %s" ), (int)(heater_set_point+0.5f), (int)(heater_temp+0.5f), (int)heater_power , (int)(air_set_point+0.5f), (int)(air_temp+0.5f), status.c_str());
 		display(buf);
 	END_EVERY_MS
 }
@@ -570,6 +598,43 @@ static void handle_status_keys(uint8_t mode)
 	retarget_menu_temp(mode);
 }
 
+
+static uint32_t tone_pattern = 0;
+static bool tone_repeat = false;
+static uint8_t tone_position = 0; 
+static void tone_handler()
+{
+	EVERY_MS(100)
+	{
+		if(tone_pattern & (1<<tone_position))
+		{
+			tone(TONE_PIN, 2000);
+		}
+		else
+		{
+			noTone(TONE_PIN);	
+		}
+		
+		++ tone_position;
+		if(tone_position >= 32)
+		{
+			if(tone_repeat)
+				tone_position = 0;
+			else
+				tone_position = 0, tone_pattern = 0;
+		}
+			
+	}
+	END_EVERY_MS
+}
+
+static void set_tone_pattern(uint32_t pattern, bool repeat)
+{
+	tone_pattern = pattern;
+	tone_repeat = repeat;
+	tone_position = 0;
+}
+
 // program opecodes
 #define PROG_END    0
 #define PROG_DWELL  1
@@ -577,45 +642,72 @@ static void handle_status_keys(uint8_t mode)
 #define PROG_WAIT_HEATER_TEMP 3
 #define PROG_SET_AIR_TEMP 4
 #define PROG_WAIT_AIR_TEMP 5
+#define PROG_WAIT_BUTTON 6
+#define PROG_SET_TONE_REPEAT 7
+#define PROG_SET_TONE 8
 
 #define MAKE_PROGRAM_WORD(OP, ARG) (((uint32_t)(ARG)<<3) | (OP))
 #define OPCODE_FROM_WORD(CODE) (uint8_t)((CODE)&0x07)
 #define ARG_FROM_WORD(CODE) (uint32_t)((CODE)>>3)
 
-#define TEMP_MATCH_MARGIN 1
+#define TEMP_MATCH_MARGIN 1.5
 
 
 static PROGMEM const uint32_t PROG1[] = {
-	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 250),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
-	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 80),
+	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0b11100011100011100011100111000),
+	MAKE_PROGRAM_WORD(PROG_WAIT_BUTTON,  0),
+	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0),
+
+
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 105),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 105),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 120),
+
+
+	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0b11100011100011100011100111000),
+	MAKE_PROGRAM_WORD(PROG_WAIT_BUTTON,  0),
+	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0),
+
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        (int)(60*60*2)),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 118),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 118),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 250),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        (int)(60*60*2)),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 118),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 118),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 80),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 250),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 80),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_HEATER_TEMP, 250),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
+
+	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0b1111111111111000000000000000),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        5),
+	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0),
 	MAKE_PROGRAM_WORD(PROG_END,          0)
 };
 static PROGMEM const uint32_t PROG2[] = {
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 120),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 40),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 40),
 	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 120),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 70),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 90),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 90),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 100),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 100),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 117),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 117   ),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 112),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 110),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*10),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 65),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        (int)(60*60*1.5)),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 110),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 120),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 120),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 65),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        (int)(60*60*1.5)),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 110),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
 	MAKE_PROGRAM_WORD(PROG_END,          0)
 };
@@ -628,7 +720,24 @@ static bool handle_prog_keys()
 		return false;
 	}
 
-	update_status_display();
+	if(secs_remain != 0)
+		update_status_display(String(secs_remain));
+	else
+		update_status_display(String(F("Busy")));
+
+	return true;
+}
+
+
+static bool handle_wait_button_keys()
+{
+	if(button_counts[BUTTON_OK] != 0)
+	{
+		button_counts[BUTTON_OK] = 0;
+		return false;
+	}
+
+	update_status_display(F("Hit OK"));
 
 	return true;
 }
@@ -680,6 +789,7 @@ start:
 					current_op = pgm_read_dword(prog);
 					static uint8_t opcode;
 					opcode = OPCODE_FROM_WORD(current_op);
+					secs_remain = 0;
 
 					if(opcode == PROG_END)
 					{
@@ -720,7 +830,7 @@ start:
 							{
 								if(heater_temp - TEMP_MATCH_MARGIN <= temp && temp <= heater_temp + TEMP_MATCH_MARGIN ) break;
 							}
-							else if(opcode == PROG_SET_AIR_TEMP)
+							else if(opcode == PROG_WAIT_AIR_TEMP)
 							{
 								if(air_temp - TEMP_MATCH_MARGIN <= temp && temp <= air_temp + TEMP_MATCH_MARGIN ) break;
 							}
@@ -728,6 +838,23 @@ start:
 							if(!handle_prog_keys()) goto start;
 						}
 					}
+					else if(opcode == PROG_WAIT_BUTTON)
+					{
+						for(;;)
+						{
+							YIELD;
+							if(!handle_wait_button_keys()) break;
+						}
+					}
+					else if(opcode = PROG_SET_TONE)
+					{
+						set_tone_pattern(ARG_FROM_WORD(current_op), false);
+					}
+					else if(opcode == PROG_SET_TONE_REPEAT)
+					{
+						set_tone_pattern(ARG_FROM_WORD(current_op), true);
+					}
+
 					++ prog;
 				}
 
@@ -756,7 +883,7 @@ start:
 				while(button_counts[BUTTON_OK] == 0)
 				{
 					handle_status_keys(m_ind);
-					update_status_display();
+					update_status_display(String());
 					YIELD;
 				}
 				button_counts[BUTTON_OK] = 0;
@@ -772,8 +899,7 @@ void setup() {
 	// put your setup code here, to run once:
 	init_buttons();
 	Serial.begin(115200);
-	pinMode(9, OUTPUT);
-	pinMode(10, OUTPUT);
+	pinMode(HEATER_PIN, OUTPUT);
 	lcd.begin(LCD_COLS, LCD_LINES);
 	Timer1.initialize(1000000 / 110);
 	Timer1.attachInterrupt(timer1_handler);
@@ -785,7 +911,10 @@ void loop() {
   // put your main code here, to run repeatedly:
 	manage_temp();
 	button_update_handler();
-	ui_handler();
+	tone_handler();
+	EVERY_MS(20)
+		ui_handler();
+	END_EVERY_MS
 
 	while(Serial.available() > 0)
 	{

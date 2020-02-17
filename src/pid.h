@@ -5,7 +5,7 @@
 
 class pid_controller_t
 {
-private:
+public:
 	float kp;
 	float ki;
 	float kd;
@@ -19,12 +19,17 @@ private:
 	float integ; //!< integrated error value
 	float perror; //!< previous error value
 	float derinteg; //!< integrated error differencial
+	float last_p;
+	float last_i;
+	float last_d;
 
 public:
 	pid_controller_t() : kp(0), ki(0), kd(0), kic(0), setpoint(0), effective_range(0), low_limit(0), high_limit(0),
 		integ(0),
 		perror(0),
-		derinteg(0) {}
+		derinteg(0),
+		last_p(0), last_i(0), last_d(0)
+		 {}
 	pid_controller_t(float kp_, float ki_, float kd_, float kic_, float eff_, float low_, float high_):
 		pid_controller_t()
 	{
@@ -45,6 +50,7 @@ public:
 		integ = 0;
 		perror = 0;
 		derinteg = 0;
+		last_p = last_i = last_d = 0;
 	}
 
 	/**
@@ -56,6 +62,11 @@ public:
 	 * update set point
 	 * */
 	void set_set_point(float v) { setpoint = v;}
+
+	/**
+	 * dump internal variables
+	 * */
+	void dump();
 
 };
 
