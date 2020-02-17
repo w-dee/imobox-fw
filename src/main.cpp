@@ -846,7 +846,7 @@ start:
 							if(!handle_wait_button_keys()) break;
 						}
 					}
-					else if(opcode = PROG_SET_TONE)
+					else if(opcode == PROG_SET_TONE)
 					{
 						set_tone_pattern(ARG_FROM_WORD(current_op), false);
 					}
