@@ -39,7 +39,7 @@ LiquidCrystal lcd(10, 12, 5,6,7,8);
 
 // buttons
 #define NUM_BUTTONS 3
-static constexpr uint8_t button_io[] = {2, 3, 4};
+static constexpr uint8_t button_io[] = {2, 4, 3};
 static uint8_t button_counts[NUM_BUTTONS] = {0};
 #define BUTTON_UP 0
 #define BUTTON_DOWN 1
@@ -52,6 +52,7 @@ static void init_buttons()
 	for(uint8_t i = 0; i < NUM_BUTTONS; ++i)
 	{
 		pinMode(button_io[i], INPUT_PULLUP);
+		button_counts[i] = 0;
 	}
 }
 
@@ -132,7 +133,7 @@ static void init_temps()
 	for(auto &&x : temps) x = 0;
 }
 
-#define PANIC_TEMPERATURE(X) ((X) < -15  || (X) > 730) // immidiate panic temperature (thermister failure/open/short)
+#define PANIC_TEMPERATURE(X) ((X) < -2  || (X) > 730) // immidiate panic temperature (thermister failure/open/short)
 #define SUPRESS_TEMPERATURE(X) ((X) > 650) // temperature which needs heating suppression
 //#define PANIC_TEMPERATURE(X) false // immidiate panic temperature (thermister failure/open/short)
 //#define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
@@ -145,7 +146,7 @@ static volatile float heater_power = 0; // last heater power
 static bool any_hot = false;
 #define AIR_TEMP_LPF_COEFF 0.05 // air temperature IIR LPF coeff
 #define HEATER_POWER_MAX 256
-#define HEATER_POWER_INCREMENT 2
+#define HEATER_POWER_INCREMENT 5
 
 static pid_controller_t heater_pid(6, 200, 1200, 0.05, 40, 0, HEATER_POWER_MAX);
 #define AIR_BASE_P 6
@@ -445,7 +446,7 @@ static int32_t secs_remain;
 
 static void update_status_display(const String & status)
 {
-	EVERY_MS(200)
+	EVERY_MS(500)
 		char buf[18*2];
 		// first line:  B:XXX/XXX P:XXX
 		// second line: T:XXX/XXX 
@@ -477,6 +478,7 @@ static uint8_t menu_item_first_index = 0;
 
 static void init_menu()
 {
+	init_buttons();
 	for(uint8_t i = 0; i < MAX_MENU_ITEM; ++i) menu[i] = String();
 	menu_selected_index = 0;
 	menu_item_first_index = 0;
@@ -654,32 +656,27 @@ static void set_tone_pattern(uint32_t pattern, bool repeat)
 
 
 static PROGMEM const uint32_t PROG1[] = {
-	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0b11100011100011100011100111000),
-	MAKE_PROGRAM_WORD(PROG_WAIT_BUTTON,  0),
-	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0),
-
-
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 105),
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 105),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 120),
-
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 102),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 102),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 104),
 
 	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0b11100011100011100011100111000),
 	MAKE_PROGRAM_WORD(PROG_WAIT_BUTTON,  0),
 	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0),
 
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 104),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*30),
 	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        (int)(60*60*2)),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 118),
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 118),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 102),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 102),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 71),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        (int)(60*60*2)),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 118),
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 118),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 103),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 103),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 69),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
 
 	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0b1111111111111000000000000000),
@@ -712,13 +709,30 @@ static PROGMEM const uint32_t PROG2[] = {
 	MAKE_PROGRAM_WORD(PROG_END,          0)
 };
 
+#define CANCEL_BUTTON_COUNT 2
+#define CANCEL_BUTTON_DURATION 1000
+
 static bool handle_prog_keys()
 {
+	static uint32_t last_button_pressed;
+	static uint8_t button_pressed_count;
 	if(button_counts[BUTTON_OK] != 0)
 	{
 		button_counts[BUTTON_OK] = 0;
-		return false;
+		if((int32_t)(millis() - last_button_pressed) <= CANCEL_BUTTON_DURATION)
+		{
+			++ button_pressed_count;
+			if(button_pressed_count >= CANCEL_BUTTON_COUNT - 1) return false;
+		}
+		last_button_pressed = millis();
 	}
+
+	if((int32_t)(millis() - last_button_pressed) > CANCEL_BUTTON_DURATION)
+	{
+		button_pressed_count = 0;
+		last_button_pressed = millis() - CANCEL_BUTTON_DURATION * 2; // always update the timestamp; to avoid wraparound
+	}
+
 
 	if(secs_remain != 0)
 		update_status_display(String(secs_remain));
@@ -756,8 +770,8 @@ static void ui_handler()
 start:
 			init_temps();
 			init_menu();
-			add_menu(F("prog 1")); // MENU_PROG1
-			add_menu(F("prog 2")); // MENU_PROG2
+			add_menu(F("Start Yakiimo")); // MENU_PROG1
+			add_menu(F("Test Program")); // MENU_PROG2
 			add_menu(F("Set heater temp")); // MENU_SET_HEATER
 			add_menu(F("Set air temp")); // MENU_SET_AIR
 
