@@ -133,8 +133,8 @@ static void init_temps()
 	for(auto &&x : temps) x = 0;
 }
 
-#define PANIC_TEMPERATURE(X) ((X) < -2  || (X) > 730) // immidiate panic temperature (thermister failure/open/short)
-#define SUPRESS_TEMPERATURE(X) ((X) > 650) // temperature which needs heating suppression
+#define PANIC_TEMPERATURE(X) ((X) < -2  || (X) > 1050) // immidiate panic temperature (thermister failure/open/short)
+#define SUPRESS_TEMPERATURE(X) ((X) > 800) // temperature which needs heating suppression
 //#define PANIC_TEMPERATURE(X) false // immidiate panic temperature (thermister failure/open/short)
 //#define SUPRESS_TEMPERATURE(X) ((X) > 280) // temperature which needs heating suppression
 #define TEMP_TARGETABLE_LOW 0 // temperature targetable range: low
@@ -144,20 +144,21 @@ static void init_temps()
 static float heater_power_target = 0; // heater power designated by PID controller
 static volatile float heater_power = 0; // last heater power
 static bool any_hot = false;
-#define AIR_TEMP_LPF_COEFF 0.05 // air temperature IIR LPF coeff
+#define AIR_TEMP_LPF_COEFF 0.2 // air temperature IIR LPF coeff
 #define HEATER_POWER_MAX 256
-#define HEATER_POWER_INCREMENT 5
+#define HEATER_POWER_INCREMENT 90
+#define HEATER_POWER_DECREMENT 70
 
-static pid_controller_t heater_pid(6, 200, 1200, 0.05, 40, 0, HEATER_POWER_MAX);
-#define AIR_BASE_P 6
-#define AIR_BASE_I 70
-#define AIR_BASE_D 37000
-static pid_controller_t air_pid(AIR_BASE_P, AIR_BASE_I, AIR_BASE_D, 0.05, 40, 0, HEATER_POWER_MAX);
+static pid_controller_t heater_pid(6, 1, 1200, 512, 1, 0.5, 40, 0, HEATER_POWER_MAX);
+#define AIR_BASE_P 30
+#define AIR_BASE_I 1
+#define AIR_BASE_D 600
+static pid_controller_t air_pid(AIR_BASE_P, AIR_BASE_I, AIR_BASE_D, 512, 1, 0.5, 40, 0, HEATER_POWER_MAX);
 #define AIR_PID_PARAM_ADJUST \
-	air_pid.kp = air_pid.setpoint >= 80 ? AIR_BASE_P * 2 : AIR_BASE_P; \
-	air_pid.ki = air_pid.setpoint >= 80 ? AIR_BASE_I * 2 : AIR_BASE_I;
+	air_pid.kp = air_pid.setpoint >= 140 ? AIR_BASE_P * 1 : (air_pid.setpoint >= 80 ? AIR_BASE_P * 1 : AIR_BASE_P); \
+	air_pid.ki = air_pid.setpoint >= 140 ? AIR_BASE_I * 1 : (air_pid.setpoint >= 80 ? AIR_BASE_I * 1 : AIR_BASE_I);
 
-#define PID_SETPOINT_OFFSET 1.0
+#define PID_SETPOINT_OFFSET 0.0
 
 
 // output string to LCD
@@ -215,6 +216,7 @@ static void panic(const String &n)
 	cli();
 	for(;;)
 	{
+		digitalWrite(HEATER_PIN, LOW); // disable heater
 		set_led(false);
 		_delay_ms(300);
 		set_led(true);
@@ -394,7 +396,7 @@ static void manage_temp()
 			}
 			else if(hp > heater_power_target)
 			{
-					hp -= HEATER_POWER_INCREMENT;
+					hp -= HEATER_POWER_DECREMENT;
 					if(hp < heater_power_target) hp = heater_power_target;
 					if(hp < 0) hp = 0;
 			}
@@ -608,7 +610,7 @@ static void tone_handler()
 {
 	EVERY_MS(100)
 	{
-		if(tone_pattern & (1<<tone_position))
+		if(tone_pattern & ((uint32_t)1<<tone_position))
 		{
 			tone(TONE_PIN, 2000);
 		}
@@ -656,27 +658,30 @@ static void set_tone_pattern(uint32_t pattern, bool repeat)
 
 
 static PROGMEM const uint32_t PROG1[] = {
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 102),
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 102),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 104),
 
-	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0b11100011100011100011100111000),
-	MAKE_PROGRAM_WORD(PROG_WAIT_BUTTON,  0),
-	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 117),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 117),
 
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 104),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*30),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        (int)(60*60*2)),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 102),
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 102),
+//	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0b11100011100011100011100000000),
+//	MAKE_PROGRAM_WORD(PROG_WAIT_BUTTON,  0),
+//	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0),
+
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 160),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 160),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*5),
+
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 73),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 71),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        (int)(60*60*2)),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 103),
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 103),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 151),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 151),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*0.9),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 74),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 69),
+
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 152),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 152),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*0.7),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 75),
 	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
 
 	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0b1111111111111000000000000000),
@@ -685,27 +690,23 @@ static PROGMEM const uint32_t PROG1[] = {
 	MAKE_PROGRAM_WORD(PROG_END,          0)
 };
 static PROGMEM const uint32_t PROG2[] = {
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 40),
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 40),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 70),
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 70),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 90),
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 90),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 100),
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 100),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 117),
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 117   ),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 112),
-	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 110),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*10),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 65),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        (int)(60*60*1.5)),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 110),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 65),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        (int)(60*60*1.5)),
-	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 110),
-	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*1),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 73),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 151),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 151),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*0.9),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 74),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
+
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 152),
+	MAKE_PROGRAM_WORD(PROG_WAIT_AIR_TEMP, 152),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*0.8),
+	MAKE_PROGRAM_WORD(PROG_SET_AIR_TEMP, 75),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        60*60*2),
+
+	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0b1111111111111000000000000000),
+	MAKE_PROGRAM_WORD(PROG_DWELL,        5),
+	MAKE_PROGRAM_WORD(PROG_SET_TONE_REPEAT,  0),
 	MAKE_PROGRAM_WORD(PROG_END,          0)
 };
 

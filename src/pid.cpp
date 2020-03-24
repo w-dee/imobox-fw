@@ -11,8 +11,11 @@ float pid_controller_t::update(float pv)
     float der = error - perror;
 
     // update integral value
-    integ += (error - integ) * kic;
-    derinteg += (der - derinteg) * kic;
+    integ *= kirc;
+    integ += error;
+    if(integ < -kilim) integ = -kilim;
+    else if(integ > kilim) integ = kilim;
+    derinteg += (der - derinteg) * kdc;
 
     // compute controller output
     last_p = kp * error;
